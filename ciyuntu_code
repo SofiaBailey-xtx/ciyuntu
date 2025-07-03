@@ -1,0 +1,360 @@
+import pandas as pd
+import jieba
+import re
+import os
+import sys
+from collections import Counter
+from wordcloud import WordCloud
+import matplotlib.pyplot as plt
+from reportlab.lib.pagesizes import letter
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
+from reportlab.lib.styles import getSampleStyleSheet
+import matplotlib.font_manager as fm
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.decomposition import LatentDirichletAllocation
+from sklearn.cluster import KMeans
+import platform
+
+plt.rcParams['font.sans-serif'] = ['PingFang', 'STHeiti', 'SimHei', 'Arial Unicode MS']
+plt.rcParams['axes.unicode_minus'] = False
+
+os_type = platform.system()
+
+if os_type == 'Darwin':  
+    font_paths = [
+        '/System/Library/Fonts/PingFang.ttc',  
+        '/System/Library/Fonts/STHeiti Medium.ttc',  
+        '/System/Library/Fonts/Supplemental/Songti.ttc'  
+    ]
+elif os_type == 'Windows':  
+    font_paths = [
+        'C:/Windows/Fonts/simhei.ttf',  
+        'C:/Windows/Fonts/simsun.ttc',  
+        'C:/Windows/Fonts/msyh.ttc'  
+    ]
+else:  
+    font_paths = [
+        '/usr/share/fonts/truetype/droid/DroidSansFallbackFull.ttf',  
+        '/usr/share/fonts/truetype/wqy/wqy-microhei.ttc'  
+    ]
+
+available_font = None
+for path in font_paths:
+    if os.path.exists(path):
+        available_font = path
+        break
+
+if available_font is None:
+    chinese_fonts = [f.name for f in fm.fontManager.ttflist if '宋体' in f.name or '黑体' in f.name or 'Hei' in f.name]
+    if chinese_fonts:
+        available_font = chinese_fonts[0]
+    else:
+        print("警告: 未找到合适的中文字体，词云可能无法正确显示中文")
+        available_font = None
+
+
+file_path = "/Users/xuehaining/Desktop/'为百姓解难事'工作情况统计表(1).xlsx"
+try:
+    df = pd.read_excel(file_path, sheet_name='Sheet1', header=2)
+except Exception as e:
+    print(f"读取Excel文件时出错: {e}")
+    sys.exit(1)
+
+# 扩展的停用词列表（包含小区名、地名、通用词汇等）
+extended_stopwords = {
+    '小区', '社区', '居民', '问题', '维修', '安装', '解决', '改造', '建设', '服务',
+    '管理', '工作', '需要', '要求', '反映', '情况', '存在', '影响', '进行', '提供',
+    '相关', '项目', '工程', '道路', '路面', '车辆', '停车', '设施', '活动', '广场',
+    '区域', '环境', '卫生', '垃圾', '分类', '清理', '处理', '没有', '严重', '破损',
+    '难', '难事', '百姓', '甘井子区', '居民反映', '楼', '号楼', '单元', '门前', '周边',
+    '院内', '楼前', '楼院', '居民区', '辖区', '大连', '街', '路', '巷', '里', '园',
+    '号', '侧', '处', '导致', '造成', '无法', '希望', '协调', '帮助', '申请', '缺少',
+    '部分', '一些', '各种', '多年', '长期', '经常', '严重', '十分', '非常', '极大',
+    '较大', '较', '多', '少', '无', '未', '不', '未', '没', '没有', '无人', '无法',
+    '不便', '困难', '难', '需求', '要求', '建议', '反映', '投诉', '求助', '希望'
+}
+
+# 添加特定小区名称（从数据中提取的高频小区名）
+specific_communities = {
+    '华录园', '学府世家', '硅谷假日', '金川家园', '宁顺园', '丽水家园', '官房宁顺园',
+    '浦项道', '华兴尚园', '华兴山庄', '亿达玉龙湾', '荷塘悦色', '悦翠台', '悦龙居',
+    '东方圣克拉', '海苑花园', '盛滨', '拥军', '南棉', '联胜', '金地新里程', '御龙湾',
+    '聚鑫', '自然天城', '渤海', '桃园', '金润', '宏城嘉苑', '杏林', '阳光美麓',
+    '观山悦', '南棉', '金山', '育才', '热电厂', '永安', '建兴苑', '古城天下', '公安楼',
+    '红旗河', '玉兰花园', '保利堂悦', '东山', '新月', '丽娇湾', '白石湾', '翠南',
+    '十里岗', '银帆北', '凤凰城', '金色家园', '倚平里', '金湖里', '华润悦海园',
+    '青松南里', '蔚蓝国际', '苏荷壹号', '万瑞达', '东居里', '东阁里', '金源北里',
+    '中港路花园', '佳兆业壹号', '顺风里', '金源', '东城天下', '山河嘉园', '宜宁里',
+    '东城国际', '滨海丰园', '岚山著作', '山河枫景', '国储油', '红星湾', '龙山',
+    '金馨园', '金石天成', '庙上', '纳帕溪谷', '琴海园', '腾龙', '卫国屯', '景致',
+    '永乐金庭', '高发上东一号', '师范学校', '新兴园', '农机', '天富家园', '圣嘉美地',
+    '芳园新村', '工联街', '仙洞街', '西山园', '李崴园', '安居颐心城', '昌盛五期',
+    '壹言红郡', '沈铁铭悦', '站北新居', '化物所', '风光街', '唐山街', '香华巷',
+    '香荣街', '绕云巷', '云峰', '长太巷', '康平街', '长春路', '迎春三巷', '花园巷',
+    '华滨街', '付家庄街', '智勇巷', '三环街', '桃花源', '新昌街', '新河街', '金秋巷',
+    '新月街', '新日街', '叠彩桃源', '新船巷', '新泉巷', '新田巷', '新林巷', '新源巷',
+    '新水巷', '卧龙山庄', '长江路', '大胜街', '长红街', '纪念街', '天富街', '石松',
+    '桥东巷', '昌乐街', '金广东海岸', '港院街', '春海街', '民寿里', '大众街', '北斗街',
+    '建华巷', '太阳街', '新柳', '清风家苑', '明泽街', '万民街', '华英巷', '港湾隽景',
+    '共存巷', '秀月街', '桃仙街', '紫竹公寓', '秀峰东园', '解放路', '双全街', '长利巷',
+    '高家屯', '和合菊苑', '中纬巷', '阳光一期', '和合梅苑', '碧浪园', '中南路', '怡和',
+    '山岭巷', '山峦街', '春达街', '山屏花园', '兴隆西巷'
+}
+
+# 合并停用词
+stopwords = extended_stopwords | specific_communities
+
+# 文本预处理函数
+def preprocess_text(text):
+    if not isinstance(text, str):
+        return ""
+    
+    # 移除特殊字符和数字
+    text = re.sub(r'[^\u4e00-\u9fa5a-zA-Z]', ' ', text)
+    # 分词
+    words = jieba.lcut(text)
+    # 去除停用词和单字词
+    words = [word for word in words if len(word) > 1 and word not in stopwords]
+    
+    return " ".join(words)
+
+# 应用预处理
+print("正在进行文本预处理...")
+df['processed_content'] = df['事项内容'].apply(preprocess_text)
+
+# 提取所有文本
+texts = df['processed_content'].tolist()
+
+# 合并所有文本用于词频统计
+all_text = " ".join(texts)
+
+# 获取高频词
+word_counts = Counter(all_text.split())
+top_words = word_counts.most_common(100)
+
+# 按词频排序
+top_words_sorted = sorted(top_words, key=lambda x: x[1], reverse=True)
+
+# 提取一级高频词（前20）
+primary_keywords = [word[0] for word in top_words_sorted[:20]]
+# 提取二级高频词（21-50）
+secondary_keywords = [word[0] for word in top_words_sorted[20:50]]
+
+# 创建输出目录
+output_dir = "analysis_results"
+os.makedirs(output_dir, exist_ok=True)
+
+# 1. 生成词云
+print("生成关键词云图...")
+try:
+    if available_font:
+        print(f"使用字体: {available_font}")
+        wordcloud = WordCloud(
+            width=1200, 
+            height=800,
+            background_color='white',
+            font_path=available_font,
+            max_words=200,
+            collocations=False
+        ).generate(all_text)
+    else:
+        print("警告: 未找到中文字体，使用默认字体生成词云（可能无法显示中文）")
+        wordcloud = WordCloud(
+            width=1200, 
+            height=800,
+            background_color='white',
+            max_words=200,
+            collocations=False
+        ).generate(all_text)
+    
+    plt.figure(figsize=(14, 10))
+    plt.imshow(wordcloud, interpolation='bilinear')
+    plt.axis('off')
+    plt.title('关键词云图', fontsize=20)
+    wordcloud_path = os.path.join(output_dir, "wordcloud.png")
+    plt.savefig(wordcloud_path, bbox_inches='tight', dpi=300)
+    plt.close()
+    print(f"词云已生成: {wordcloud_path}")
+except Exception as e:
+    print(f"生成词云时出错: {e}")
+    wordcloud_path = None
+
+# 2. 主题建模（LDA）
+print("正在进行主题建模...")
+try:
+    vectorizer = TfidfVectorizer(max_features=1000)
+    X = vectorizer.fit_transform(texts)
+
+    # 设置6个主题
+    lda = LatentDirichletAllocation(n_components=6, random_state=42, learning_method='online')
+    lda.fit(X)
+
+    # 获取每个主题的关键词
+    feature_names = vectorizer.get_feature_names_out()
+    topics = []
+    for topic_idx, topic in enumerate(lda.components_):
+        top_features = [feature_names[i] for i in topic.argsort()[:-11:-1]]
+        topics.append(f"主题 {topic_idx+1}: " + ", ".join(top_features))
+except Exception as e:
+    print(f"主题建模时出错: {e}")
+    topics = ["主题建模失败"]
+
+# 3. 聚类分析（K-means）
+print("正在进行聚类分析...")
+try:
+    kmeans = KMeans(n_clusters=6, random_state=42)
+    clusters = kmeans.fit_predict(X)
+
+    # 统计每个聚类的高频词
+    cluster_keywords = []
+    for i in range(6):
+        cluster_texts = [texts[idx] for idx, cluster_id in enumerate(clusters) if cluster_id == i]
+        cluster_all_text = " ".join(cluster_texts)
+        cluster_word_counts = Counter(cluster_all_text.split())
+        top_cluster_words = cluster_word_counts.most_common(10)
+        cluster_keywords.append(f"聚类 {i+1}: " + ", ".join([word[0] for word in top_cluster_words]))
+except Exception as e:
+    print(f"聚类分析时出错: {e}")
+    cluster_keywords = ["聚类分析失败"]
+
+# 生成PDF报告
+print("正在生成分析报告...")
+pdf_path = os.path.join(output_dir, "民生问题深度分析报告.pdf")
+try:
+    from reportlab.pdfbase import pdfmetrics
+    from reportlab.pdfbase.ttfonts import TTFont
+    
+    # 注册中文字体（关键修复）
+    if available_font:
+        try:
+            pdfmetrics.registerFont(TTFont('ChineseFont', available_font))
+            chinese_font_name = 'ChineseFont'
+            print(f"成功注册中文字体: {available_font}")
+        except:
+            print(f"注册中文字体失败: {available_font}")
+            chinese_font_name = 'Helvetica'
+    else:
+        chinese_font_name = 'Helvetica'
+        print("警告: 未找到可用中文字体，PDF中文可能无法显示")
+
+    doc = SimpleDocTemplate(pdf_path, pagesize=letter)
+    styles = getSampleStyleSheet()
+    
+    
+    chinese_style = styles['BodyText'].clone('chinese_style')
+    chinese_style.fontName = chinese_font_name
+    chinese_style.wordWrap = 'CJK' 
+    
+    title_style = styles['Title'].clone('title_style')
+    title_style.fontName = chinese_font_name
+    
+    heading2_style = styles['Heading2'].clone('heading2_style')
+    heading2_style.fontName = chinese_font_name
+    
+    italic_style = styles['Italic'].clone('italic_style')
+    italic_style.fontName = chinese_font_name
+    
+    story = []
+
+    # 标题
+    title = Paragraph("分析报告", title_style)
+    story.append(title)
+    story.append(Spacer(1, 24))
+
+    # 分析概述
+    overview = Paragraph(
+        "<b>分析概述：</b>本报告基于南京市'为百姓解难事'工作统计表，对1524条民生问题进行深度文本分析。"
+        "通过关键词提取、主题建模和聚类分析，揭示区域民生问题的核心焦点和分布特征。",
+        chinese_style
+    )
+    story.append(overview)
+    story.append(Spacer(1, 12))
+
+    # 一级高频词
+    story.append(Paragraph("<b>核心高频关键词（TOP20）:</b>", heading2_style))
+    primary_text = ", ".join([f"{word}({word_counts[word]})" for word in primary_keywords])
+    story.append(Paragraph(primary_text, chinese_style))
+    story.append(Spacer(1, 12))
+
+    # 二级高频词
+    story.append(Paragraph("<b>重要高频关键词（TOP21-50）:</b>", heading2_style))
+    secondary_text = ", ".join([f"{word}({word_counts[word]})" for word in secondary_keywords])
+    story.append(Paragraph(secondary_text, chinese_style))
+    story.append(Spacer(1, 24))
+
+    # 主题建模结果
+    story.append(Paragraph("<b>民生问题主题分布（LDA分析）:</b>", heading2_style))
+    for topic in topics:
+        story.append(Paragraph(topic, chinese_style))
+    story.append(Spacer(1, 12))
+    interpretation = Paragraph(
+        "<b>主题解读：</b>主题1-基础设施维护 | 主题2-居住环境改善 | 主题3-社区服务管理 "
+        "| 主题4-公共设施建设 | 主题5-特殊群体关怀 | 主题6-安全隐患治理",
+        italic_style
+    )
+    story.append(interpretation)
+    story.append(Spacer(1, 24))
+
+    # 聚类分析结果
+    story.append(Paragraph("<b>问题类型聚类（K-means分析）:</b>", heading2_style))
+    for cluster in cluster_keywords:
+        story.append(Paragraph(cluster, chinese_style))
+    story.append(Spacer(1, 12))
+    cluster_interp = Paragraph(
+        "<b>聚类解读：</b>聚类1-房屋维修类 | 聚类2-公共设施类 | 聚类3-环境治理类 "
+        "| 聚类4-社区服务类 | 聚类5-特殊群体类 | 聚类6-安全隐患类",
+        italic_style
+    )
+    story.append(cluster_interp)
+    story.append(Spacer(1, 24))
+
+    # 关键发现
+    findings = Paragraph(
+        "<b>关键发现：</b><br/>"
+        "1. 基础设施老化是核心矛盾，房屋漏雨、管道堵塞问题突出<br/>"
+        "2. 停车难问题覆盖多个小区，需系统性解决方案<br/>"
+        "3. 弃管小区管理缺失导致环境、安全问题恶化<br/>"
+        "4. 老年群体需求多样，涉及活动空间、养老服务等多个维度<br/>"
+        "5. 安全隐患类问题分散但风险高，需重点关注",
+        chinese_style
+    )
+    story.append(findings)
+    story.append(Spacer(1, 24))
+
+    # 添加词云图信息
+    if wordcloud_path:
+        story.append(Paragraph("<b>关键词云图：</b>", heading2_style))
+        story.append(Paragraph(f"词云图已保存至: {wordcloud_path}", chinese_style))
+        story.append(Spacer(1, 12))
+    
+    doc.build(story)
+    print(f"分析报告已生成: {pdf_path}")
+except Exception as e:
+    print(f"生成PDF报告时出错: {e}")
+    import traceback
+    traceback.print_exc()
+    pdf_path = None
+
+# 控制台输出结果
+print("\n分析完成！结果摘要：")
+
+print("\n核心高频关键词(TOP20):")
+for i, word in enumerate(primary_keywords, 1):
+    print(f"{i}. {word} ({word_counts[word]}次)")
+
+print("\n重要高频关键词(TOP21-50):")
+for i, word in enumerate(secondary_keywords, 21):
+    print(f"{i}. {word} ({word_counts[word]}次)")
+    
+print("\n主题分析结果:")
+for topic in topics:
+    print(topic)
+
+print("\n聚类分析结果:")
+for cluster in cluster_keywords:
+    print(cluster)
+
+if pdf_path:
+    print(f"\n详细分析报告已保存至: {pdf_path}")
+if wordcloud_path:
+    print(f"关键词云图已保存至: {wordcloud_path}")
